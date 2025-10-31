@@ -2,7 +2,7 @@ name: KJPP Telegram Monitor
 on:
   workflow_dispatch:
   schedule:
-    - cron: '10 6 * * *'
+    - cron: '10 6 * * *'   # 06:10 UTC ≈ 07:10 Berlin (winter)
 
 jobs:
   run:
@@ -14,7 +14,6 @@ jobs:
       with:
         python-version: '3.11'
 
-    # Show where we are and what files exist
     - name: Diagnostics (files)
       run: |
         pwd
@@ -26,11 +25,9 @@ jobs:
         echo "---- check job_urls.txt ----"
         if [ -f job_urls.txt ]; then echo OK: urls file found && echo "----- job_urls.txt -----" && cat job_urls.txt; else echo "MISSING: job_urls.txt" && exit 2; fi
 
-    # Ensure Python deps install
     - name: Install deps
       run: pip install requests beautifulsoup4 lxml
 
-    # Send a Telegram test message using your secrets (proves token + chat ID are valid)
     - name: Telegram test ping
       run: |
         set -e
@@ -41,13 +38,10 @@ jobs:
           | tee /tmp/tg_response.json
         echo "Telegram response:"
         cat /tmp/tg_response.json
-        echo
-        jq '.ok' /tmp/tg_response.json || true
       env:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
-    # Run your monitor script (uses the same secrets)
     - name: Run monitor
       run: python monitor_kjpp_jobs_telegram.py
       env:
