@@ -1,56 +1,33 @@
 name: KJPP Telegram Monitor
-
 on:
   workflow_dispatch:
   schedule:
-    - cron: '10 5 * * *'   # 05:10 UTC ≈ 07:10 Berlin (summer, CEST)
-    - cron: '10 6 * * *'   # 06:10 UTC ≈ 07:10 Berlin (winter, CET)
+    - cron: '10 6 * * *'   # 06:10 UTC ≈ 07:10 Berlin (winter)
 
 jobs:
   run:
     runs-on: ubuntu-latest
-
-    permissions:
-      contents: write   # needed only if you later choose to commit results back
-
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-
-    - name: Setup Python
-      uses: actions/setup-python@v5
+    - uses: actions/checkout@v4
+    
+    - uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-
+        
     - name: Install dependencies
       run: pip install requests beautifulsoup4 lxml
-
-    # (Optional) quick Telegram ping to verify secrets work
-    # - name: Telegram ping (optional)
-    #   run: |
-    #     set -e
-    #     curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-    #       -d chat_id="${TELEGRAM_CHAT_ID}" \
-    #       -d text="KJPP monitor run started ✅" \
-    #       | tee /tmp/tg_response.json
-    #     echo "TG response:"; cat /tmp/tg_response.json
-    #   env:
-    #     TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-    #     TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
-    - name: Run KJPP monitor
+      
+    - name: Run KJPP Monitor
       run: python monitor_kjpp_jobs_telegram.py
       env:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
+        
     - name: Upload results as artifact
-      if: always()   # upload even if the job finds nothing or errors
       uses: actions/upload-artifact@v4
       with:
         name: kjpp-results
         path: |
           last_results.txt
           last_new_results.txt
-          state.json
-        if-no-files-found: warn
+        retention-days: 7
