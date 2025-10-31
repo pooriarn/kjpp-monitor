@@ -1,0 +1,15 @@
+name: Debug File Locations
+on: [workflow_dispatch]
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Find all files
+      run: |
+        echo "=== ALL FILES ==="
+        find . -type f | sort
+        echo ""
+        echo "=== PYTHON AND TXT FILES ==="
+        find . -type f \( -name "*.py" -o -name "*.txt" \) | sort
