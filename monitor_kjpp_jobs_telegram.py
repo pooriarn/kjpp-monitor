@@ -2,9 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-KJPP Job Monitor — Telegram only
+KJPP Job Monitor — Telegram + results export
 Scans career pages listed in job_urls.txt, classifies matches, and
 sends a Telegram message with KJPP-physician roles first, then related roles.
+
+Creates:
+  - state.json              (seen items across runs)
+  - last_results.txt        (all matches in this run, ordered KJPP → RELATED)
+  - last_new_results.txt    (only new matches in this run, ordered KJPP → RELATED)
 
 Env (Secrets):
   TELEGRAM_BOT_TOKEN
@@ -12,7 +17,6 @@ Env (Secrets):
 
 Files (repo root):
   job_urls.txt       # one URL per line (career/Jobs pages)
-  state.json         # auto-created to track previously seen hits
 """
 
 import os
@@ -21,7 +25,7 @@ import json
 import time
 import hashlib
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Tuple
 from urllib.parse import urljoin
 
 import requests
@@ -31,10 +35,12 @@ from bs4 import BeautifulSoup
 
 STATE_FILE = "state.json"
 URLS_FILE = "job_urls.txt"
+LAST_RESULTS_FILE = "last_results.txt"
+LAST_NEW_RESULTS_FILE = "last_new_results.txt"
 
 TIMEOUT = 30
 SLEEP_BETWEEN = 2.0  # polite crawling pause (seconds)
-USER_AGENT = "KJPP-JobMonitor/2.0 (+telegram-only)"
+USER_AGENT = "KJPP-JobMonitor/2.1 (+telegram-only)"
 
 # If True → send RELATED roles too (after KJPP). If False → only KJPP.
 INCLUDE_RELATED = True
@@ -64,7 +70,7 @@ STRICT_KJPP_PATTERNS = [
     r"\bweiterbildungsassistent\b.*kinder.*jugendpsychiatr",
     r"\bärztin?\b.*kinder.*jugendpsychiatr",
     r"\barzt\b.*kinder.*jugendpsychiatr",
-    r"\b(w|weiterbildung).*(kinder.*jugendpsychiatr)",  # Weiterbildung KJPP
+    r"\b(w|weiterbildung).*(kinder.*jugendpsychiatr)",
     r"\bkinder-?\s*und-?\s*jugendpsychiatr.*(arzt|ärztin|facharzt|oberarzt|assistenzarzt)",
 ]
 STRICT_KJPP_RE = re.compile("(" + "|".join(STRICT_KJPP_PATTERNS) + ")", re.I | re.U)
@@ -160,7 +166,6 @@ def tgsend(text: str):
     if not TG_TOKEN or not TG_CHAT:
         print("[WARN] Telegram not configured; skipping send.")
         return
-    # Telegram message limit ~4096 chars
     chunks = [text[i:i+3500] for i in range(0, len(text), 3500)] or [text]
     for c in chunks:
         try:
@@ -171,6 +176,15 @@ def tgsend(text: str):
             )
         except Exception as e:
             print("[WARN] Telegram send error:", e)
+
+def write_txt(path: str, header: str, lines: List[str]) -> None:
+    """Write a simple readable text export."""
+    body = header.rstrip() + "\n\n"
+    if lines:
+        body += "\n".join(lines) + "\n"
+    else:
+        body += "(keine Treffer)\n"
+    Path(path).write_text(body, encoding="utf-8")
 
 # ------------------ MAIN LOGIC ---------------------
 
@@ -188,7 +202,8 @@ def run_once() -> int:
     ]
 
     state = load_state()
-    new_items = []  # (priority, line)
+    new_items: List[Tuple[int, str]] = []   # (priority, line)
+    all_items: List[Tuple[int, str]] = []   # (priority, line)
 
     for url in urls:
         try:
@@ -207,25 +222,38 @@ def run_once() -> int:
                     filtered.append(c)
                 # OTHER → ignored
 
-            # new only + build lines
+            # Build "all" list (not deduped by state)
+            for c in filtered:
+                label = c["cls"]  # 'KJPP' or 'RELATED'
+                prio = 0 if label == "KJPP" else 1
+                all_items.append((prio, f"• [{label}] {c.get('title','(ohne Titel)')}\n  {c['href']}"))
+
+            # New-only decisions (state)
             for c in filtered:
                 uid = make_id(c["href"], c.get("title", ""))
                 if uid not in state:
                     state[uid] = time.time()
-                    label = c["cls"]  # 'KJPP' or 'RELATED'
+                    label = c["cls"]
                     line = f"• [{label}] {c.get('title','(ohne Titel)')}\n  {c['href']}"
-                    # priority: KJPP first (0), RELATED after (1)
                     prio = 0 if label == "KJPP" else 1
                     new_items.append((prio, line))
         except Exception as e:
-            new_items.append((2, f"[WARN] {url}: {e}"))
+            warn = f"[WARN] {url}: {e}"
+            all_items.append((2, warn))
+            new_items.append((2, warn))
         time.sleep(SLEEP_BETWEEN)
 
     save_state(state)
 
-    # Sort and send
+    # Sort & export text files
+    all_items.sort(key=lambda x: x[0])
+    new_items.sort(key=lambda x: x[0])
+
+    write_txt(LAST_RESULTS_FILE, "Alle Treffer dieses Laufs (KJPP zuerst):", [ln for _, ln in all_items])
+    write_txt(LAST_NEW_RESULTS_FILE, "Neue Treffer dieses Laufs (KJPP zuerst):", [ln for _, ln in new_items])
+
+    # Telegram message for new items only
     if new_items:
-        new_items.sort(key=lambda x: x[0])
         body = "🆕 Neue Stellen (KJPP zuerst):\n\n" + "\n".join(line for _, line in new_items)
         print(body)
         tgsend(body)
