@@ -1,24 +1,44 @@
 name: KJPP Telegram Monitor
-
 on:
+  workflow_dispatch:
   schedule:
-    - cron: "10 6 * * *"   # daily at 06:10 UTC ≈ 07:10 Berlin winter
-  workflow_dispatch: {}     # manual trigger button
+    - cron: '10 6 * * *'
 
 jobs:
   run:
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
 
-      - run: pip install requests beautifulsoup4 lxml
+    # 1) See what files are where
+    - run: |
+        pwd
+        ls -la
+        echo "Has script?"; [ -f monitor_kjpp_jobs_telegram.py ] && echo YES || echo NO
+        echo "Has job_urls.txt?"; [ -f job_urls.txt ] && echo YES || echo NO
 
-      - run: python monitor_kjpp_jobs_telegram.py
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    # 2) Check env presence (booleans only; no secrets printed)
+    - run: |
+        python - <<'PY'
+        import os, pathlib
+        print("CWD:", pathlib.Path().resolve())
+        print("SCRIPT EXISTS:", pathlib.Path("monitor_kjpp_jobs_telegram.py").exists())
+        print("JOB_URLS EXISTS:", pathlib.Path("job_urls.txt").exists())
+        print("TOKEN SET:", bool(os.getenv("TELEGRAM_BOT_TOKEN")))
+        print("CHAT_ID SET:", bool(os.getenv("TELEGRAM_CHAT_ID")))
+        PY
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+    - run: pip install requests beautifulsoup4 lxml
+
+    - name: Run monitor
+      run: python monitor_kjpp_jobs_telegram.py
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
