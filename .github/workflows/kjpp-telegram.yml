@@ -1,64 +1,15 @@
-name: KJPP Telegram Monitor
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: '10 6 * * *'   # 06:10 UTC ≈ 07:10 Berlin (winter)
+name: Debug File Locations
+on: [workflow_dispatch]
 
 jobs:
-  run:
+  debug:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-
-    - uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-
-    - name: Diagnostics (files)
+    - name: Find all files
       run: |
-        echo "Current directory:"
-        pwd
-        echo "All files:"
-        ls -la
-        echo "---- check script ----"
-        find . -name "monitor_kjpp_jobs_telegram.py" -type f
-        echo "---- check job_urls.txt ----"
-        find . -name "job_urls.txt" -type f
-        echo "---- verifying files exist ----"
-        if [ -f "monitor_kjpp_jobs_telegram.py" ]; then 
-          echo "✓ monitor_kjpp_jobs_telegram.py found"
-        else
-          echo "✗ monitor_kjpp_jobs_telegram.py missing"
-          exit 1
-        fi
-        if [ -f "job_urls.txt" ]; then 
-          echo "✓ job_urls.txt found"
-          echo "Content:"
-          cat job_urls.txt
-        else
-          echo "✗ job_urls.txt missing"
-          exit 1
-        fi
-
-    - name: Install deps
-      run: pip install requests beautifulsoup4 lxml
-
-    - name: Telegram test ping
-      run: |
-        set -e
-        echo "Sending Telegram test…"
-        curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-          -d chat_id="${TELEGRAM_CHAT_ID}" \
-          -d text="KJPP monitor: GitHub Actions can send messages ✅" \
-          | tee /tmp/tg_response.json
-        echo "Telegram response:"
-        cat /tmp/tg_response.json
-      env:
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
-    - name: Run monitor
-      run: python monitor_kjpp_jobs_telegram.py
-      env:
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        echo "=== ALL FILES ==="
+        find . -type f | sort
+        echo ""
+        echo "=== PYTHON AND TXT FILES ==="
+        find . -type f \( -name "*.py" -o -name "*.txt" \) | sort
