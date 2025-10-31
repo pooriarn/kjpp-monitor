@@ -14,29 +14,40 @@ jobs:
       with:
         python-version: '3.11'
 
-    # 1) See what files are where
-    - run: |
+    # Show where we are and what files exist
+    - name: Diagnostics (files)
+      run: |
         pwd
         ls -la
-        echo "Has script?"; [ -f monitor_kjpp_jobs_telegram.py ] && echo YES || echo NO
-        echo "Has job_urls.txt?"; [ -f job_urls.txt ] && echo YES || echo NO
+        echo "---- show .github/workflows ----"
+        ls -la .github/workflows || true
+        echo "---- check script ----"
+        if [ -f monitor_kjpp_jobs_telegram.py ]; then echo OK: script found; else echo "MISSING: monitor_kjpp_jobs_telegram.py" && exit 2; fi
+        echo "---- check job_urls.txt ----"
+        if [ -f job_urls.txt ]; then echo OK: urls file found && echo "----- job_urls.txt -----" && cat job_urls.txt; else echo "MISSING: job_urls.txt" && exit 2; fi
 
-    # 2) Check env presence (booleans only; no secrets printed)
-    - run: |
-        python - <<'PY'
-        import os, pathlib
-        print("CWD:", pathlib.Path().resolve())
-        print("SCRIPT EXISTS:", pathlib.Path("monitor_kjpp_jobs_telegram.py").exists())
-        print("JOB_URLS EXISTS:", pathlib.Path("job_urls.txt").exists())
-        print("TOKEN SET:", bool(os.getenv("TELEGRAM_BOT_TOKEN")))
-        print("CHAT_ID SET:", bool(os.getenv("TELEGRAM_CHAT_ID")))
-        PY
+    # Ensure Python deps install
+    - name: Install deps
+      run: pip install requests beautifulsoup4 lxml
+
+    # Send a Telegram test message using your secrets (proves token + chat ID are valid)
+    - name: Telegram test ping
+      run: |
+        set -e
+        echo "Sending Telegram test…"
+        curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+          -d chat_id="${TELEGRAM_CHAT_ID}" \
+          -d text="KJPP monitor: GitHub Actions can send messages ✅" \
+          | tee /tmp/tg_response.json
+        echo "Telegram response:"
+        cat /tmp/tg_response.json
+        echo
+        jq '.ok' /tmp/tg_response.json || true
       env:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
-    - run: pip install requests beautifulsoup4 lxml
-
+    # Run your monitor script (uses the same secrets)
     - name: Run monitor
       run: python monitor_kjpp_jobs_telegram.py
       env:
