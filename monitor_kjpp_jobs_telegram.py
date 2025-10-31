@@ -2,21 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-KJPP Job Monitor — Telegram + results export
-Scans career pages listed in job_urls.txt, classifies matches, and
-sends a Telegram message with KJPP-physician roles first, then related roles.
-
-Creates:
-  - state.json              (seen items across runs)
-  - last_results.txt        (all matches in this run, ordered KJPP → RELATED)
-  - last_new_results.txt    (only new matches in this run, ordered KJPP → RELATED)
-
-Env (Secrets):
-  TELEGRAM_BOT_TOKEN
-  TELEGRAM_CHAT_ID
-
-Files (repo root):
-  job_urls.txt       # one URL per line (career/Jobs pages)
+KJPP Job Monitor — Enhanced version for complex career pages
 """
 
 import os
@@ -40,13 +26,11 @@ LAST_RESULTS_FILE = "last_results.txt"
 LAST_NEW_RESULTS_FILE = "last_new_results.txt"
 
 TIMEOUT = 30
-SLEEP_BETWEEN = 2.0  # polite crawling pause (seconds)
-USER_AGENT = "KJPP-JobMonitor/2.1 (+telegram-only)"
+SLEEP_BETWEEN = 2.0
+USER_AGENT = "KJPP-JobMonitor/2.2 (+telegram-only)"
 
-# If True → send RELATED roles too (after KJPP). If False → only KJPP.
 INCLUDE_RELATED = True
 
-# Telegram (required)
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
 
@@ -54,29 +38,28 @@ HEADERS = {"User-Agent": USER_AGENT}
 
 # ------------------ PATTERN SETS ------------------
 
-# Broad KJPP-related signals (kept for discovery)
 KEYWORDS = [
     r"kinder-?\s*und-?\s*jugendpsychi",
     r"kinder-?\s*und-?\s*jugendpsychother",
     r"\bkjpp\b", r"\bkjp\b",
     r"jugendpsychiatr", r"kinderpsychiatr",
+    r"kinder-?jugend-?psych",  # Added more flexible patterns
 ]
 KEYWORDS_RE = re.compile("(" + "|".join(KEYWORDS) + ")", re.I | re.U)
 
-# Stricter patterns → true *physician* KJPP roles
 STRICT_KJPP_PATTERNS = [
     r"\bfacharzt\b.*kinder.*jugendpsychiatr",
-    r"\boberarzt\b.*kinder.*jugendpsychiatr",
+    r"\boberarzt\b.*kinder.*jugendpsychiatr", 
     r"\bassistenzarzt\b.*kinder.*jugendpsychiatr",
     r"\bweiterbildungsassistent\b.*kinder.*jugendpsychiatr",
     r"\bärztin?\b.*kinder.*jugendpsychiatr",
     r"\barzt\b.*kinder.*jugendpsychiatr",
     r"\b(w|weiterbildung).*(kinder.*jugendpsychiatr)",
     r"\bkinder-?\s*und-?\s*jugendpsychiatr.*(arzt|ärztin|facharzt|oberarzt|assistenzarzt)",
+    r"kinder-?jugend-?psychiatr.*arzt",  # More flexible pattern
 ]
 STRICT_KJPP_RE = re.compile("(" + "|".join(STRICT_KJPP_PATTERNS) + ")", re.I | re.U)
 
-# Related roles in the KJPP setting (optional)
 RELATED_PATTERNS = [
     r"psycholog.*kinder", r"psychotherapeut.*jugend", r"therapeut.*jugend",
     r"pflege.*jugendpsychiatr", r"erzieher.*jugendpsychiatr",
@@ -84,23 +67,9 @@ RELATED_PATTERNS = [
 ]
 RELATED_RE = re.compile("(" + "|".join(RELATED_PATTERNS) + ")", re.I | re.U)
 
-# Links we generally ignore
-BLOCK_PATH_WORDS = [
-    "impressum", "datenschutz", "privacy", "agb", "kontakt",
-    "login", "sitemap", "newsletter"
-]
-
-# Typical job subpaths
-JOB_HINTS = [
-    "/stellen", "/jobs", "/karriere", "/bewerb",
-    "/stellenangebot", "/ausschreibung", "vacanc", "job",
-    "position", "medizin", "arzt", "psycholog"
-]
-
-# ------------------ UTILITIES ---------------------
+# ------------------ ENHANCED PARSING ---------------------
 
 def load_state() -> Dict[str, float]:
-    """Load the state of previously seen items."""
     if Path(STATE_FILE).exists():
         try:
             return json.loads(Path(STATE_FILE).read_text(encoding="utf-8"))
@@ -110,7 +79,6 @@ def load_state() -> Dict[str, float]:
     return {}
 
 def save_state(state: Dict[str, float]) -> None:
-    """Save the state of seen items."""
     try:
         Path(STATE_FILE).write_text(
             json.dumps(state, ensure_ascii=False, indent=2), 
@@ -121,52 +89,77 @@ def save_state(state: Dict[str, float]) -> None:
         print(f"✗ Error saving state: {e}")
 
 def http_get(url: str) -> str:
-    """Fetch URL with proper headers and timeout."""
     r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
     r.raise_for_status()
     return r.text
 
-def normalize(base: str, href: str) -> str:
-    """Normalize relative URLs to absolute."""
-    return urljoin(base, (href or "").strip())
-
-def looks_like_job_link(href: str, text: str) -> bool:
-    """Check if link looks like a job posting."""
-    if not href:
-        return False
-    low = href.lower()
-    if any(w in low for w in BLOCK_PATH_WORDS):
-        return False
-    if any(h in low for h in JOB_HINTS):
-        return True
-    return bool(KEYWORDS_RE.search(text or ""))
-
-def extract_candidates(html: str, base_url: str) -> List[Dict]:
-    """Extract potential job candidates from HTML."""
+def extract_jobs_from_content_page(html: str, base_url: str) -> List[Dict]:
+    """
+    Enhanced extraction for content pages like Wichernstift
+    that have job listings embedded in the page content.
+    """
     soup = BeautifulSoup(html, "lxml")
     items = []
     
-    # 1) Extract from links
-    for a in soup.find_all("a"):
-        href = normalize(base_url, a.get("href"))
-        text = (a.get_text(" ", strip=True) or "").strip()
-        if not href.startswith(("http://", "https://")):
-            continue
-        if looks_like_job_link(href, text) or KEYWORDS_RE.search(text):
-            items.append({"href": href, "title": text or href})
+    print(f"    Analyzing page content for job patterns...")
     
-    # 2) Fallback: whole page mentions KJPP keywords
-    if KEYWORDS_RE.search(soup.get_text(" ", strip=True)):
-        items.append({"href": base_url, "title": "Hinweis: Keywords auf Seite gefunden"})
+    # Method 1: Look for job listings in links
+    for a in soup.find_all("a", href=True):
+        href = a['href']
+        text = a.get_text(" ", strip=True)
+        
+        # Skip obviously non-job links
+        if any(block in href.lower() for block in ["impressum", "datenschutz", "login"]):
+            continue
+            
+        # If link text contains job-related terms, consider it
+        if text and any(term in text.lower() for term in ["stellen", "job", "karriere", "bewerbung"]):
+            full_url = urljoin(base_url, href)
+            items.append({"href": full_url, "title": text, "source": "link"})
+    
+    # Method 2: Look for job titles in headings and paragraphs
+    for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li']):
+        text = tag.get_text(" ", strip=True)
+        if not text or len(text) < 10:
+            continue
+            
+        # Check if this looks like a job title/description
+        if (any(term in text.lower() for term in ["stellen", "job", "stelle", "arzt", "psycholog", "therapeut"]) and
+            not any(block in text.lower() for block in ["impressum", "datenschutz"])):
+            
+            # Try to find a link nearby
+            link = tag.find('a', href=True)
+            if link:
+                full_url = urljoin(base_url, link['href'])
+                items.append({"href": full_url, "title": text, "source": "heading_with_link"})
+            else:
+                # Use the page itself as URL if no specific link found
+                items.append({"href": base_url, "title": text, "source": "heading"})
+    
+    # Method 3: Look for specific job pattern matches in any text
+    page_text = soup.get_text(" ", strip=True)
+    lines = page_text.split('\n')
+    
+    for line in lines:
+        line = line.strip()
+        if len(line) < 20:
+            continue
+            
+        # Check for KJPP patterns in any text on the page
+        if STRICT_KJPP_RE.search(line) or RELATED_RE.search(line):
+            items.append({"href": base_url, "title": line[:200], "source": "text_match"})
     
     # Deduplicate
-    seen, uniq = set(), []
-    for it in items:
-        k = it["href"].strip()
-        if k not in seen:
-            seen.add(k)
-            uniq.append(it)
-    return uniq
+    seen = set()
+    unique_items = []
+    for item in items:
+        key = item["href"] + "|" + item["title"][:100]
+        if key not in seen:
+            seen.add(key)
+            unique_items.append(item)
+    
+    print(f"    Found {len(unique_items)} potential job items via enhanced parsing")
+    return unique_items
 
 def classify_hit(title: str, url: str) -> str:
     """Classify as 'KJPP' (physician), 'RELATED' (other KJPP-area roles), or 'OTHER'."""
@@ -187,7 +180,6 @@ def tgsend(text: str):
         print("[WARN] Telegram not configured; skipping send.")
         return
     
-    # Split long messages (Telegram limit ~4096 chars)
     chunks = [text[i:i+3500] for i in range(0, len(text), 3500)] or [text]
     for i, chunk in enumerate(chunks):
         try:
@@ -224,14 +216,12 @@ def write_txt(path: str, header: str, lines: List[str]) -> None:
 def run_once() -> int:
     """Run one monitoring cycle. Returns number of new items found."""
     
-    # Basic checks
     if not TG_TOKEN or not TG_CHAT:
         raise SystemExit("ERROR: Bitte TELEGRAM_BOT_TOKEN und TELEGRAM_CHAT_ID als Umgebungsvariablen setzen.")
     
     if not Path(URLS_FILE).exists():
         raise SystemExit(f"ERROR: {URLS_FILE} fehlt.")
 
-    # Load URLs to monitor
     urls = [
         u.strip()
         for u in Path(URLS_FILE).read_text(encoding="utf-8").splitlines()
@@ -241,35 +231,37 @@ def run_once() -> int:
     print(f"🔍 Monitoring {len(urls)} URLs...")
     
     state = load_state()
-    new_items: List[Tuple[int, str]] = []   # (priority, line)
-    all_items: List[Tuple[int, str]] = []   # (priority, line)
+    new_items: List[Tuple[int, str]] = []
+    all_items: List[Tuple[int, str]] = []
 
     for i, url in enumerate(urls, 1):
         print(f"  [{i}/{len(urls)}] Checking: {url}")
         try:
             html = http_get(url)
-            candidates = extract_candidates(html, url)
-            print(f"    Found {len(candidates)} candidate(s)")
-
-            # Classify and filter candidates
+            
+            # Use enhanced parsing for content pages
+            candidates = extract_jobs_from_content_page(html, url)
+            
+            # Classify candidates
             filtered = []
             for c in candidates:
                 cls = classify_hit(c.get("title", ""), c["href"])
                 if cls == "KJPP":
                     c["cls"] = "KJPP"
                     filtered.append(c)
+                    print(f"    ✅ KJPP match: {c.get('title', 'No title')}")
                 elif INCLUDE_RELATED and cls == "RELATED":
                     c["cls"] = "RELATED"
                     filtered.append(c)
-                # Ignore 'OTHER' classifications
+                    print(f"    ✅ RELATED match: {c.get('title', 'No title')}")
 
-            # Build "all" list (not deduped by state)
+            # Build lists
             for c in filtered:
-                label = c["cls"]  # 'KJPP' or 'RELATED'
+                label = c["cls"]
                 prio = 0 if label == "KJPP" else 1
                 all_items.append((prio, f"• [{label}] {c.get('title','(ohne Titel)')}\n  {c['href']}"))
 
-            # New-only decisions (state)
+            # Check for new items
             for c in filtered:
                 uid = make_id(c["href"], c.get("title", ""))
                 if uid not in state:
@@ -290,16 +282,15 @@ def run_once() -> int:
 
     save_state(state)
 
-    # Sort & export text files (KJPP first, then RELATED)
+    # Export results
     all_items.sort(key=lambda x: x[0])
     new_items.sort(key=lambda x: x[0])
 
     write_txt(LAST_RESULTS_FILE, "Alle Treffer dieses Laufs (KJPP zuerst):", [ln for _, ln in all_items])
     write_txt(LAST_NEW_RESULTS_FILE, "Neue Treffer dieses Laufs (KJPP zuerst):", [ln for _, ln in new_items])
 
-    # Telegram message for new items only
+    # Send Telegram notification
     if new_items:
-        # Group by priority for better formatting
         kjpp_items = [line for prio, line in new_items if prio == 0]
         related_items = [line for prio, line in new_items if prio == 1]
         
@@ -313,7 +304,7 @@ def run_once() -> int:
         tgsend(body)
         return len(new_items)
 
-    print("✅ Keine neuen Treffer.")
+    print("✅ Scan completed. No new KJPP positions found.")
     return 0
 
 if __name__ == "__main__":
