@@ -1,19 +1,24 @@
-ame: KJPP Telegram Monitor
+name: KJPP Telegram Monitor
+
 on:
-schedule:
-- cron: "10 6 * * *" # täglich 06:10 UTC ≈ 07:10 Europe/Berlin (Winterzeit)
-workflow_dispatch: {}
+  schedule:
+    - cron: "10 6 * * *"   # daily at 06:10 UTC ≈ 07:10 Berlin winter
+  workflow_dispatch: {}     # manual trigger button
 
 jobs:
-run:
-runs-on: ubuntu-latest
-steps:
-- uses: actions/checkout@v4
-- uses: actions/setup-python@v5
-with:
-python-version: "3.11"
-- run: pip install requests beautifulsoup4 lxml
-- run: python monitor_kjpp_jobs_telegram.py
-env:
-TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install requests beautifulsoup4 lxml
+
+      - run: python monitor_kjpp_jobs_telegram.py
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
