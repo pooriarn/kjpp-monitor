@@ -1,78 +1,141 @@
 #!/usr/bin/env python3
-import requests
-import hashlib
-import time
+# -*- coding: utf-8 -*-
+
+"""
+KJPP Job Monitor — Telegram only
+Scans career pages listed in job_urls.txt, classifies matches, and
+sends a Telegram message with KJPP-physician roles first, then related roles.
+
+Env (Secrets):
+  TELEGRAM_BOT_TOKEN
+  TELEGRAM_CHAT_ID
+
+Files (repo root):
+  job_urls.txt       # one URL per line (career/Jobs pages)
+  state.json         # auto-created to track previously seen hits
+"""
+
+import os
 import re
-from pathlib import Path
 import json
-from bs4 import BeautifulSoup
+import time
+import hashlib
+from pathlib import Path
+from typing import List, Dict
 from urllib.parse import urljoin
 
-# Configuration
-URLS_FILE = "job_urls.txt"
+import requests
+from bs4 import BeautifulSoup
+
+# --------------------- CONFIG ---------------------
+
 STATE_FILE = "state.json"
-SLEEP_BETWEEN = 2
-TG_TOKEN = None
-TG_CHAT = None
+URLS_FILE = "job_urls.txt"
 
-# Keywords for job detection
+TIMEOUT = 30
+SLEEP_BETWEEN = 2.0  # polite crawling pause (seconds)
+USER_AGENT = "KJPP-JobMonitor/2.0 (+telegram-only)"
+
+# If True → send RELATED roles too (after KJPP). If False → only KJPP.
+INCLUDE_RELATED = True
+
+# Telegram (required)
+TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
+
+HEADERS = {"User-Agent": USER_AGENT}
+
+# ------------------ PATTERN SETS ------------------
+
+# Broad KJPP-related signals (kept for discovery)
 KEYWORDS = [
-    "psycholog", "psychiater", "therapeut", "therapie", "psychotherapie",
-    "psychologie", "kinderpsycholog", "jugendpsycholog", "neuropsycholog",
-    "psychiatrie", "verhaltenstherapie", "tiefenpsychologie"
+    r"kinder-?\s*und-?\s*jugendpsychi",
+    r"kinder-?\s*und-?\s*jugendpsychother",
+    r"\bkjpp\b", r"\bkjp\b",
+    r"jugendpsychiatr", r"kinderpsychiatr",
 ]
-KEYWORDS_RE = re.compile("|".join(KEYWORDS), re.IGNORECASE)
+KEYWORDS_RE = re.compile("(" + "|".join(KEYWORDS) + ")", re.I | re.U)
 
-BLOCK_PATH_WORDS = ["login", "logout", "signin", "signup", "register", "impressum", "datenschutz"]
+# Stricter patterns → true *physician* KJPP roles
+STRICT_KJPP_PATTERNS = [
+    r"\bfacharzt\b.*kinder.*jugendpsychiatr",
+    r"\boberarzt\b.*kinder.*jugendpsychiatr",
+    r"\bassistenzarzt\b.*kinder.*jugendpsychiatr",
+    r"\bweiterbildungsassistent\b.*kinder.*jugendpsychiatr",
+    r"\bärztin?\b.*kinder.*jugendpsychiatr",
+    r"\barzt\b.*kinder.*jugendpsychiatr",
+    r"\b(w|weiterbildung).*(kinder.*jugendpsychiatr)",  # Weiterbildung KJPP
+    r"\bkinder-?\s*und-?\s*jugendpsychiatr.*(arzt|ärztin|facharzt|oberarzt|assistenzarzt)",
+]
+STRICT_KJPP_RE = re.compile("(" + "|".join(STRICT_KJPP_PATTERNS) + ")", re.I | re.U)
 
-def load_state():
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
+# Related roles in the KJPP setting (optional)
+RELATED_PATTERNS = [
+    r"psycholog.*kinder", r"psychotherapeut.*jugend", r"therapeut.*jugend",
+    r"pflege.*jugendpsychiatr", r"erzieher.*jugendpsychiatr",
+    r"pädagog.*jugendpsychiatr", r"sozialarbeit.*jugendpsychiatr",
+]
+RELATED_RE = re.compile("(" + "|".join(RELATED_PATTERNS) + ")", re.I | re.U)
 
-def save_state(state):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+# Links we generally ignore
+BLOCK_PATH_WORDS = [
+    "impressum", "datenschutz", "privacy", "agb", "kontakt",
+    "login", "sitemap", "newsletter"
+]
 
-def http_get(url):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; KJPP-Monitor/1.0)"
-    }
-    resp = requests.get(url, headers=headers, timeout=30)
-    resp.raise_for_status()
-    return resp.text
+# Typical job subpaths
+JOB_HINTS = [
+    "/stellen", "/jobs", "/karriere", "/bewerb",
+    "/stellenangebot", "/ausschreibung", "vacanc", "job",
+    "position", "medizin", "arzt", "psycholog"
+]
 
-def normalize(base_url, href):
+# ------------------ UTILITIES ---------------------
+
+def load_state() -> Dict[str, float]:
+    if Path(STATE_FILE).exists():
+        try:
+            return json.loads(Path(STATE_FILE).read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+def save_state(state: Dict[str, float]) -> None:
+    Path(STATE_FILE).write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def http_get(url: str) -> str:
+    r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+    r.raise_for_status()
+    return r.text
+
+def normalize(base: str, href: str) -> str:
+    return urljoin(base, (href or "").strip())
+
+def looks_like_job_link(href: str, text: str) -> bool:
     if not href:
-        return ""
-    if href.startswith(("http://", "https://")):
-        return href
-    return urljoin(base_url, href)
-
-def looks_like_job_link(href, text):
-    low = href.lower()
-    if any(w in low for w in BLOCK_PATH_WORDS): 
         return False
-    if any(p in low for p in ["/stellen", "/jobs", "/karriere", "/bewerb", "/stellenangebot", "/ausschreibung", "vacanc", "job", "position", "bewerb", "medizin", "arzt", "psycholog"]):
+    low = href.lower()
+    if any(w in low for w in BLOCK_PATH_WORDS):
+        return False
+    if any(h in low for h in JOB_HINTS):
         return True
     return bool(KEYWORDS_RE.search(text or ""))
 
-def extract_candidates(html, base_url):
+def extract_candidates(html: str, base_url: str) -> List[Dict]:
     soup = BeautifulSoup(html, "lxml")
     items = []
+    # 1) links
     for a in soup.find_all("a"):
         href = normalize(base_url, a.get("href"))
         text = (a.get_text(" ", strip=True) or "").strip()
-        if href.startswith(("http://", "https://")) and (looks_like_job_link(href, text) or KEYWORDS_RE.search(text)):
+        if not href.startswith(("http://", "https://")):
+            continue
+        if looks_like_job_link(href, text) or KEYWORDS_RE.search(text):
             items.append({"href": href, "title": text or href})
-    
-    # Fallback: Keywords im Seitentext
+    # 2) fallback: whole page mentions KJPP keywords
     if KEYWORDS_RE.search(soup.get_text(" ", strip=True)):
         items.append({"href": base_url, "title": "Hinweis: Keywords auf Seite gefunden"})
-    
-    # Dedupe
+    # dedupe
     seen, uniq = set(), []
     for it in items:
         k = it["href"].strip()
@@ -81,68 +144,96 @@ def extract_candidates(html, base_url):
             uniq.append(it)
     return uniq
 
-def make_id(url, title):
+def classify_hit(title: str, url: str) -> str:
+    """Return 'KJPP' (physician), 'RELATED' (other KJPP-area roles), or 'OTHER'."""
+    text = f"{title or ''} {url}".lower()
+    if STRICT_KJPP_RE.search(text):
+        return "KJPP"
+    if RELATED_RE.search(text) or KEYWORDS_RE.search(text):
+        return "RELATED"
+    return "OTHER"
+
+def make_id(url: str, title: str) -> str:
     return hashlib.sha256((url + "|" + (title or "")).encode("utf-8")).hexdigest()[:24]
 
-def tgsend(text):
+def tgsend(text: str):
     if not TG_TOKEN or not TG_CHAT:
-        print("[WARN] Telegram nicht konfiguriert")
+        print("[WARN] Telegram not configured; skipping send.")
         return
-    
-    # Telegram-Message-Limit ~4096 Zeichen → ggf. splitten
+    # Telegram message limit ~4096 chars
     chunks = [text[i:i+3500] for i in range(0, len(text), 3500)] or [text]
     for c in chunks:
         try:
             requests.post(
                 f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                json={
-                    "chat_id": TG_CHAT, 
-                    "text": c, 
-                    "disable_web_page_preview": True
-                },
-                timeout=30
+                json={"chat_id": TG_CHAT, "text": c, "disable_web_page_preview": True},
+                timeout=30,
             )
         except Exception as e:
-            print("[WARN] Telegram send:", e)
+            print("[WARN] Telegram send error:", e)
 
-def run_once():
-    # Get Telegram credentials from environment
-    global TG_TOKEN, TG_CHAT
-    TG_TOKEN = TG_TOKEN or environ.get('TELEGRAM_BOT_TOKEN')
-    TG_CHAT = TG_CHAT or environ.get('TELEGRAM_CHAT_ID')
-    
+# ------------------ MAIN LOGIC ---------------------
+
+def run_once() -> int:
+    # basic checks
     if not TG_TOKEN or not TG_CHAT:
         raise SystemExit("Bitte TELEGRAM_BOT_TOKEN und TELEGRAM_CHAT_ID als Umgebungsvariablen setzen.")
-    
     if not Path(URLS_FILE).exists():
         raise SystemExit(f"{URLS_FILE} fehlt.")
-    
-    urls = [u.strip() for u in Path(URLS_FILE).read_text(encoding="utf-8").splitlines() 
-            if u.strip() and not u.strip().startswith("#")]
-    
+
+    urls = [
+        u.strip()
+        for u in Path(URLS_FILE).read_text(encoding="utf-8").splitlines()
+        if u.strip() and not u.strip().startswith("#")
+    ]
+
     state = load_state()
-    new_lines = []
+    new_items = []  # (priority, line)
 
     for url in urls:
         try:
             html = http_get(url)
-            for c in extract_candidates(html, url):
-                txt = f"{c.get('title','')} {c['href']}"
-                if KEYWORDS_RE.search(txt):
-                    uid = make_id(c["href"], c.get("title",""))
-                    if uid not in state:
-                        state[uid] = time.time()
-                        new_lines.append(f"• {c.get('title','(ohne Titel)')}\n {c['href']}")
-        except Exception as e:
-            new_lines.append(f"[WARN] {url}: {e}")
-        time.sleep(SLEEP_BETWEEN)
+            candidates = extract_candidates(html, url)
 
-    if new_lines:
-        tgsend("🆕 Neue KJPP-Stellen:\n\n" + "\n".join(new_lines))
+            # classify and filter
+            filtered = []
+            for c in candidates:
+                cls = classify_hit(c.get("title", ""), c["href"])
+                if cls == "KJPP":
+                    c["cls"] = "KJPP"
+                    filtered.append(c)
+                elif INCLUDE_RELATED and cls == "RELATED":
+                    c["cls"] = "RELATED"
+                    filtered.append(c)
+                # OTHER → ignored
+
+            # new only + build lines
+            for c in filtered:
+                uid = make_id(c["href"], c.get("title", ""))
+                if uid not in state:
+                    state[uid] = time.time()
+                    label = c["cls"]  # 'KJPP' or 'RELATED'
+                    line = f"• [{label}] {c.get('title','(ohne Titel)')}\n  {c['href']}"
+                    # priority: KJPP first (0), RELATED after (1)
+                    prio = 0 if label == "KJPP" else 1
+                    new_items.append((prio, line))
+        except Exception as e:
+            new_items.append((2, f"[WARN] {url}: {e}"))
+        time.sleep(SLEEP_BETWEEN)
 
     save_state(state)
 
+    # Sort and send
+    if new_items:
+        new_items.sort(key=lambda x: x[0])
+        body = "🆕 Neue Stellen (KJPP zuerst):\n\n" + "\n".join(line for _, line in new_items)
+        print(body)
+        tgsend(body)
+        return len(new_items)
+
+    print("Keine neuen Treffer.")
+    return 0
+
 if __name__ == "__main__":
-    from os import environ
-    run_once()
-    print("OK")
+    hits = run_once()
+    print(f"Done. Neue Treffer: {hits}")
