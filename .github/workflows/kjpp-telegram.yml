@@ -16,14 +16,29 @@ jobs:
 
     - name: Diagnostics (files)
       run: |
+        echo "Current directory:"
         pwd
+        echo "All files:"
         ls -la
-        echo "---- show .github/workflows ----"
-        ls -la .github/workflows || true
         echo "---- check script ----"
-        if [ -f monitor_kjpp_jobs_telegram.py ]; then echo OK: script found; else echo "MISSING: monitor_kjpp_jobs_telegram.py" && exit 2; fi
+        find . -name "monitor_kjpp_jobs_telegram.py" -type f
         echo "---- check job_urls.txt ----"
-        if [ -f job_urls.txt ]; then echo OK: urls file found && echo "----- job_urls.txt -----" && cat job_urls.txt; else echo "MISSING: job_urls.txt" && exit 2; fi
+        find . -name "job_urls.txt" -type f
+        echo "---- verifying files exist ----"
+        if [ -f "monitor_kjpp_jobs_telegram.py" ]; then 
+          echo "✓ monitor_kjpp_jobs_telegram.py found"
+        else
+          echo "✗ monitor_kjpp_jobs_telegram.py missing"
+          exit 1
+        fi
+        if [ -f "job_urls.txt" ]; then 
+          echo "✓ job_urls.txt found"
+          echo "Content:"
+          cat job_urls.txt
+        else
+          echo "✗ job_urls.txt missing"
+          exit 1
+        fi
 
     - name: Install deps
       run: pip install requests beautifulsoup4 lxml
